@@ -4,6 +4,12 @@ pragma solidity ^0.8.20;
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 
+interface IMessageTransmitter {
+    function receiveMessage(bytes calldata message, bytes calldata attestation) 
+        external 
+        returns (bool success);
+}
+
 contract NexusVault {
     using SafeERC20 for IERC20;
 
@@ -18,6 +24,7 @@ contract NexusVault {
 
     // --- State Variables ---
     IERC20 public immutable USDC;
+    IMessageTransmitter public immutable MESSAGE_TRANSMITTER;
     
     mapping(uint256 campaignId => CampaignParams) public campaigns;
     uint256 public nextCampaignId;
@@ -43,9 +50,13 @@ contract NexusVault {
     );
     event FundsWithdrawn(
         address indexed merchant,
+        uint256 amount
+    );
+    event CCTPPaymentProcessed(
+        address indexed merchant,
         uint256 amount,
-        uint32 destinationDomain,
-        bytes32 mintRecipient
+        string orderId,
+        bytes32 messageHash
     );
 
     // --- Errors ---
@@ -55,12 +66,17 @@ contract NexusVault {
     error NexusVault__InvalidAmount();
     error NexusVault__InsufficientBalance();
     error NexusVault__RewardLimitReached();
+    error NexusVault__InvalidMessageFormat();
+    error NexusVault__CCTPReceiveFailed();
 
-    constructor(address _usdc) {
+    constructor(address _usdc, address _messageTransmitter) {
         USDC = IERC20(_usdc);
+        MESSAGE_TRANSMITTER = IMessageTransmitter(_messageTransmitter);
     }
 
-    // Create a new referral campaign with a reward limit cap
+    // --- External Functions ---
+
+// Create a new referral campaign with a reward limit cap
     function createReferralCampaign(
         uint256 referrerPct,
         uint256 rewardLimit
@@ -85,46 +101,7 @@ contract NexusVault {
         );
     }
 
-    // Process a payment with instant referral split
-    function payWithReferral(
-        uint256 amount,
-        uint256 campaignId,
-        address referrer,
-        string memory orderId
-    ) external {
-        if (amount == 0) revert NexusVault__InvalidAmount();
-
-        CampaignParams storage campaign = campaigns[campaignId];
-        if (!campaign.isActive) revert NexusVault__CampaignInactive();
-
-        // Receive user payment
-        USDC.safeTransferFrom(msg.sender, address(this), amount);
-
-        // Calculate potential reward
-        uint256 rewardAmount = (amount * campaign.referrerPct) / 100;
-        
-        // Check limit
-        if (campaign.totalRewarded + rewardAmount <= campaign.rewardLimit) {
-            campaign.totalRewarded += rewardAmount;
-            
-            // Instant payment to referrer
-            if (rewardAmount > 0) {
-                USDC.safeTransfer(referrer, rewardAmount);
-                emit RewardPaid(campaignId, referrer, rewardAmount);
-            }
-            
-            // Merchant gets the rest
-            uint256 merchantShare = amount - rewardAmount;
-            merchantBalances[campaign.merchant] += merchantShare;
-            emit PaymentReceived(campaign.merchant, merchantShare, orderId);
-
-        } else {
-
-             revert NexusVault__RewardLimitReached();
-        }
-    }
-
-    // Standard payment (no referral)
+    // Standard payment (no referral), and no cross-chain (direct payment)
     function pay(
         uint256 amount,
         address merchant,
@@ -133,39 +110,69 @@ contract NexusVault {
         if (amount == 0) revert NexusVault__InvalidAmount();
 
         USDC.safeTransferFrom(msg.sender, address(this), amount);
-        merchantBalances[merchant] += amount;
-
-        emit PaymentReceived(merchant, amount, orderId);
+        _processPay(amount, merchant, orderId);
     }
 
-    // Withdraw merchant sales revenue
-    function withdraw(
-        uint256 amount,
-        uint32 destinationDomain,
-        bytes32 mintRecipient
+    //TODO payWithReferral()
+
+    // Handle CCTP cross-chain payment with hooks
+    function handleCctpPayment(
+        bytes calldata message,
+        bytes calldata attestation
     ) external {
+        bool success = MESSAGE_TRANSMITTER.receiveMessage(message, attestation);
+        if (!success) revert NexusVault__CCTPReceiveFailed();
+
+        bytes memory hookData = _extractHookData(message);
+        (address merchant, string memory orderId) = abi.decode(hookData, (address, string));
+        uint256 amount = _extractAmount(message);
+    
+        _processPay(amount, merchant, orderId);
+        
+        emit CCTPPaymentProcessed(merchant, amount, orderId, keccak256(message));
+    }
+
+    // Withdraw merchant earnings to their wallet (on Arc Testnet)
+    function withdraw(uint256 amount) external {
         if (merchantBalances[msg.sender] < amount)
             revert NexusVault__InsufficientBalance();
 
         merchantBalances[msg.sender] -= amount;
+        USDC.safeTransfer(msg.sender, amount);
 
-        _payout(msg.sender, amount, destinationDomain, mintRecipient);
-
-        emit FundsWithdrawn(
-            msg.sender,
-            amount,
-            destinationDomain,
-            mintRecipient
-        );
+        emit FundsWithdrawn(msg.sender, amount);
     }
 
-    function _payout(
-        address recipient, 
-        uint256 amount, 
-        uint32 destinationDomain, 
-        bytes32 mintRecipient
+    // --- Internal Functions ---
+    function _processPay(
+        uint256 amount,
+        address merchant,
+        string memory orderId
     ) internal {
-        // TODO gateway stuff
-        USDC.safeTransfer(recipient, amount);
+        merchantBalances[merchant] += amount;
+        emit PaymentReceived(merchant, amount, orderId);
     }
+
+
+    function _extractHookData(bytes calldata message) internal pure returns (bytes memory) {
+        uint256 hookDataStart = 148 + 228; // 376
+        
+        if (message.length <= hookDataStart) {
+            revert NexusVault__InvalidMessageFormat();
+        }
+        
+        return message[hookDataStart:];
+    }
+
+    function _extractAmount(bytes calldata message) internal pure returns (uint256) {
+
+        uint256 amountOffset = 148 + 68;
+        
+        if (message.length < amountOffset + 32) {
+            revert NexusVault__InvalidMessageFormat();
+        }
+        
+        return abi.decode(message[amountOffset:amountOffset + 32], (uint256));
+    }
+
 }
