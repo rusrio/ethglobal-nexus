@@ -7,24 +7,24 @@ import { useState as useState3 } from "react";
 var CCTP_CONTRACTS = {
   // Ethereum Sepolia
   11155111: {
-    tokenMessenger: "0x9f3B8679c73C2Fef8b59B4f3444d4e156fb70AA5",
-    messageTransmitter: "0x7865fAfC2db2093669d92c0F33AeEF291086BEFD",
+    tokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    messageTransmitter: "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
     usdc: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
     domain: 0,
     name: "Ethereum Sepolia"
   },
   // Base Sepolia
   84532: {
-    tokenMessenger: "0x9f3B8679c73C2Fef8b59B4f3444d4e156fb70AA5",
-    messageTransmitter: "0x7865fAfC2db2093669d92c0F33AeEF291086BEFD",
+    tokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    messageTransmitter: "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
     usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
     domain: 6,
     name: "Base Sepolia"
   },
   // Arbitrum Sepolia
   421614: {
-    tokenMessenger: "0x9f3B8679c73C2Fef8b59B4f3444d4e156fb70AA5",
-    messageTransmitter: "0xaCF1ceeF35caAc005e15888dDb8A3515C41B4872",
+    tokenMessenger: "0x8FE6B999Dc680CcFDD5Bf7EB0974218be2542DAA",
+    messageTransmitter: "0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275",
     usdc: "0x75faf114eafb1BDbe2F0316DF893fd58CE46AA4d",
     domain: 3,
     name: "Arbitrum Sepolia"
@@ -38,12 +38,11 @@ var CCTP_CONTRACTS = {
     name: "Arc Testnet"
   }
 };
-var NEXUS_VAULT_ADDRESS = "0xa043E3380B32FDB0F9BBD225D71ab2811600b56C";
+var NEXUS_VAULT_ADDRESS = "0xfC159e07f19aCd1d17575febCB285175206FB792";
 var ARC_TESTNET_CHAIN_ID = 5042002;
-var CIRCLE_API_BASE_URL = "https://iris-api-sandbox.circle.com";
 
 // src/components/NexusPayment.tsx
-import { useAccount, useChainId } from "wagmi";
+import { useAccount as useAccount2, useChainId } from "wagmi";
 import { parseUnits } from "viem";
 
 // src/hooks/useDirectPayment.ts
@@ -65,12 +64,14 @@ var NEXUS_VAULT_ABI = [
   },
   {
     type: "function",
-    name: "handleCctpPayment",
+    name: "handleReceiveFinalizedMessage",
     inputs: [
-      { name: "message", type: "bytes" },
-      { name: "attestation", type: "bytes" }
+      { name: "sourceDomain", type: "uint32" },
+      { name: "sender", type: "bytes32" },
+      { name: "finalityThresholdExecuted", type: "uint32" },
+      { name: "messageBody", type: "bytes" }
     ],
-    outputs: [],
+    outputs: [{ name: "success", type: "bool" }],
     stateMutability: "nonpayable"
   }
 ];
@@ -113,6 +114,8 @@ var TOKEN_MESSENGER_ABI = [
       { name: "mintRecipient", type: "bytes32" },
       { name: "burnToken", type: "address" },
       { name: "destinationCaller", type: "bytes32" },
+      { name: "maxFee", type: "uint256" },
+      { name: "minFinalityThreshold", type: "uint32" },
       { name: "hookData", type: "bytes" }
     ],
     outputs: [{ name: "nonce", type: "uint64" }],
@@ -162,40 +165,10 @@ function useDirectPayment() {
 
 // src/hooks/useCCTPBridge.ts
 import { useState as useState2 } from "react";
-import { useWriteContract as useWriteContract2, usePublicClient } from "wagmi";
+import { useWriteContract as useWriteContract2, usePublicClient, useSwitchChain, useAccount } from "wagmi";
 import { parseAbiParameters, encodeAbiParameters } from "viem";
-import { privateKeyToAccount } from "viem/accounts";
 
 // src/utils/cctp.ts
-async function waitForAttestation(messageHash, maxRetries = 60, retryInterval = 2e4) {
-  let retries = 0;
-  while (retries < maxRetries) {
-    try {
-      const response = await fetch(
-        `${CIRCLE_API_BASE_URL}/v2/attestations/${messageHash}`
-      );
-      if (!response.ok) {
-        if (response.status === 404) {
-          retries++;
-          await new Promise((resolve) => setTimeout(resolve, retryInterval));
-          continue;
-        }
-        throw new Error(`Attestation API error: ${response.statusText}`);
-      }
-      const data = await response.json();
-      if (data.status === "complete" && data.attestation) {
-        return data.attestation;
-      }
-      retries++;
-      await new Promise((resolve) => setTimeout(resolve, retryInterval));
-    } catch (error) {
-      console.error("Error fetching attestation:", error);
-      retries++;
-      await new Promise((resolve) => setTimeout(resolve, retryInterval));
-    }
-  }
-  throw new Error("Attestation timeout - exceeded maximum retries");
-}
 function addressToBytes32(address) {
   const hex = address.slice(2).padStart(64, "0");
   return `0x${hex}`;
@@ -203,10 +176,12 @@ function addressToBytes32(address) {
 
 // src/hooks/useCCTPBridge.ts
 function useCCTPBridge() {
-  const [status, setStatus] = useState2("idle");
-  const [error, setError] = useState2(null);
-  const [currentStep, setCurrentStep] = useState2("");
+  const { address, chainId } = useAccount();
   const { writeContractAsync } = useWriteContract2();
+  const { switchChainAsync } = useSwitchChain();
+  const [status, setStatus] = useState2("idle");
+  const [currentStep, setCurrentStep] = useState2("");
+  const [error, setError] = useState2("");
   const publicClient = usePublicClient();
   const executePayment = async (params) => {
     try {
@@ -224,93 +199,81 @@ function useCCTPBridge() {
         args: [chainConfig.tokenMessenger, params.amount]
       });
       console.log("Approval tx:", approveTxHash);
+      setStatus("burning");
       setCurrentStep("Preparing hook data...");
       const hookData = encodeAbiParameters(
         parseAbiParameters("address, string"),
         [params.merchant, params.orderId]
       );
-      setStatus("burning");
       setCurrentStep("Burning USDC on source chain...");
       const destinationDomain = CCTP_CONTRACTS[ARC_TESTNET_CHAIN_ID].domain;
       const mintRecipient = addressToBytes32(NEXUS_VAULT_ADDRESS);
-      const destinationCaller = addressToBytes32(NEXUS_VAULT_ADDRESS);
+      const protocolFee = 20000n;
+      const totalAmountToBurn = params.amount + protocolFee;
       const burnTxHash = await writeContractAsync({
         address: chainConfig.tokenMessenger,
         abi: TOKEN_MESSENGER_ABI,
         functionName: "depositForBurnWithHook",
         args: [
-          params.amount,
+          totalAmountToBurn,
+          // Payment + protocol fee
           destinationDomain,
           mintRecipient,
           chainConfig.usdc,
-          destinationCaller,
+          "0x0000000000000000000000000000000000000000000000000000000000000000",
+          // destinationCaller = 0
+          protocolFee,
+          // maxFee for Circle protocol fee (NOT forwarding fee)
+          1e3,
+          // minFinalityThreshold
           hookData
-        ]
+          // merchant + orderId
+        ],
+        gas: 500000n
+        // Explicit gas limit to avoid Sepolia's 16.777M cap
       });
       console.log("Burn tx:", burnTxHash);
-      setCurrentStep("Fetching transaction receipt...");
-      if (!publicClient) {
-        throw new Error("Public client not available");
-      }
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash: burnTxHash,
-        confirmations: 1
-      });
-      setStatus("attesting");
       setCurrentStep("Waiting for Circle attestation (~20 seconds)...");
-      const messageHash = burnTxHash;
-      const attestation = await waitForAttestation(messageHash);
-      console.log("Attestation received");
-      setStatus("finalizing");
-      setCurrentStep("Finalizing payment on Arc Testnet...");
-      const operatorAccount = privateKeyToAccount(params.operatorPrivateKey);
-      const arcPublicClient = await import("viem").then(
-        (m) => m.createPublicClient({
-          chain: {
-            id: ARC_TESTNET_CHAIN_ID,
-            name: "Arc Testnet",
-            network: "arc-testnet",
-            nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
-            rpcUrls: {
-              default: { http: [process.env.ARC_TESTNET_RPC_URL || ""] },
-              public: { http: [process.env.ARC_TESTNET_RPC_URL || ""] }
-            }
-          },
-          transport: m.http()
-        })
-      );
-      const arcWalletClient = await import("viem").then(
-        (m) => m.createWalletClient({
-          account: operatorAccount,
-          chain: {
-            id: ARC_TESTNET_CHAIN_ID,
-            name: "Arc Testnet",
-            network: "arc-testnet",
-            nativeCurrency: { name: "ETH", symbol: "ETH", decimals: 18 },
-            rpcUrls: {
-              default: { http: [process.env.ARC_TESTNET_RPC_URL || ""] },
-              public: { http: [process.env.ARC_TESTNET_RPC_URL || ""] }
-            }
-          },
-          transport: m.http()
-        })
-      );
-      const message = receipt.logs[0]?.data || "0x";
-      const finalizeTxHash = await arcWalletClient.writeContract({
-        address: NEXUS_VAULT_ADDRESS,
-        abi: NEXUS_VAULT_ABI,
-        functionName: "handleCctpPayment",
-        args: [message, attestation]
+      const sourceDomain = chainConfig.domain;
+      const attestation = await pollForAttestation(burnTxHash, sourceDomain);
+      if (!attestation) {
+        throw new Error("Failed to get attestation from Circle");
+      }
+      setCurrentStep("Switching to Arc Testnet...");
+      await switchChainAsync({ chainId: ARC_TESTNET_CHAIN_ID });
+      setCurrentStep("Calling receiveMessage on Arc Testnet...");
+      const arcConfig = CCTP_CONTRACTS[ARC_TESTNET_CHAIN_ID];
+      const receiveTxHash = await writeContractAsync({
+        address: arcConfig.messageTransmitter,
+        abi: [{
+          type: "function",
+          name: "receiveMessage",
+          stateMutability: "nonpayable",
+          inputs: [
+            { name: "message", type: "bytes" },
+            { name: "attestation", type: "bytes" }
+          ],
+          outputs: [{ type: "bool" }]
+        }],
+        functionName: "receiveMessage",
+        args: [attestation.message, attestation.attestation],
+        chain: { id: ARC_TESTNET_CHAIN_ID },
+        gas: 500000n
+        // Explicit gas limit
       });
-      console.log("Finalize tx:", finalizeTxHash);
+      console.log("Receive tx:", receiveTxHash);
       setStatus("success");
-      setCurrentStep("Payment successful!");
-      return finalizeTxHash;
-    } catch (err) {
-      const error2 = err instanceof Error ? err : new Error("CCTP payment failed");
-      setError(error2);
+      setCurrentStep("Payment completed! Merchant balance updated on Arc.");
+      return {
+        burnTxHash,
+        receiveTxHash,
+        amount: params.amount
+      };
+    } catch (error2) {
+      console.error("Bridge error:", error2);
       setStatus("error");
-      setCurrentStep("Payment failed");
+      setCurrentStep(error2.message || "Transaction failed");
+      setError(error2.message || "Unknown error");
       throw error2;
     }
   };
@@ -321,6 +284,28 @@ function useCCTPBridge() {
     currentStep,
     isLoading: status !== "idle" && status !== "success" && status !== "error"
   };
+}
+async function pollForAttestation(txHash, sourceDomain, maxAttempts = 20) {
+  const apiUrl = `https://iris-api-sandbox.circle.com/v2/messages/${sourceDomain}?transactionHash=${txHash}`;
+  for (let i = 0; i < maxAttempts; i++) {
+    try {
+      const response = await fetch(apiUrl);
+      const data = await response.json();
+      if (data.messages?.length > 0) {
+        const msg = data.messages[0];
+        if (msg.status === "complete" && msg.attestation && msg.message && typeof msg.attestation === "string" && typeof msg.message === "string" && msg.attestation.startsWith("0x") && msg.message.startsWith("0x") && msg.attestation !== "0x" && msg.message !== "0x" && !msg.attestation.includes("PENDING") && !msg.message.includes("PENDING")) {
+          return {
+            message: msg.message,
+            attestation: msg.attestation
+          };
+        }
+      }
+    } catch (error) {
+      console.log(`Attestation attempt ${i + 1}/${maxAttempts} failed, retrying...`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 3e3));
+  }
+  return null;
 }
 
 // src/components/NexusPayment.tsx
@@ -341,7 +326,7 @@ function NexusPayment(props) {
     onError,
     onStatusChange
   } = props;
-  const { address, chain } = useAccount();
+  const { address, chain } = useAccount2();
   const chainId = useChainId();
   const [inputAmount, setInputAmount] = useState3("");
   const [txHash, setTxHash] = useState3(null);
@@ -380,18 +365,19 @@ function NexusPayment(props) {
           userAddress: address
         });
       } else {
-        resultTxHash = await cctpBridge.executePayment({
+        const result = await cctpBridge.executePayment({
           amount,
           merchant: merchantAddress,
           orderId,
           sourceChainId: chainId,
           operatorPrivateKey
         });
+        resultTxHash = result.burnTxHash;
       }
       setTxHash(resultTxHash);
       onSuccess?.(resultTxHash, amount);
     } catch (err) {
-      const error = err instanceof Error ? err : new Error("Payment failed");
+      const error = err instanceof Error ? err : new Error(String(err));
       onError?.(error);
     }
   };
@@ -437,12 +423,9 @@ function NexusPayment(props) {
       /* @__PURE__ */ jsx("div", { style: defaultStyles.spinner }),
       /* @__PURE__ */ jsx("span", { children: !isDirectPayment && cctpBridge.currentStep ? cctpBridge.currentStep : currentStatus.charAt(0).toUpperCase() + currentStatus.slice(1) + "..." })
     ] }),
-    currentError && /* @__PURE__ */ jsxs("div", { className: "error-message", style: defaultStyles.errorMessage, children: [
-      "\u26A0\uFE0F ",
-      currentError.message
-    ] }),
+    currentError && /* @__PURE__ */ jsx("div", { className: "error-message", style: defaultStyles.errorMessage, children: typeof currentError === "string" ? currentError : currentError.message }),
     currentStatus === "success" && txHash && /* @__PURE__ */ jsxs("div", { className: "success-message", style: defaultStyles.successMessage, children: [
-      "\u2705 Payment successful!",
+      "Payment successful!",
       chain?.blockExplorers?.default && /* @__PURE__ */ jsx(
         "a",
         {

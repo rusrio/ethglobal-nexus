@@ -85,23 +85,24 @@ export function NexusPayment(props: NexusPaymentProps) {
           merchant: merchantAddress,
           orderId,
           usdcAddress: chainConfig.usdc,
-         userAddress: address,
+          userAddress: address,
         });
       } else {
         // Cross-chain payment via CCTP
-        resultTxHash = await cctpBridge.executePayment({
+        const result = await cctpBridge.executePayment({
           amount,
           merchant: merchantAddress,
           orderId,
           sourceChainId: chainId,
           operatorPrivateKey,
         });
+        resultTxHash = result.burnTxHash;
       }
 
       setTxHash(resultTxHash);
       onSuccess?.(resultTxHash, amount);
     } catch (err) {
-      const error = err instanceof Error ? err : new Error('Payment failed');
+      const error = err instanceof Error ? err : new Error(String(err));
       onError?.(error);
     }
   };
@@ -177,10 +178,11 @@ export function NexusPayment(props: NexusPaymentProps) {
           </div>
         )}
 
+
         {/* Error Display */}
         {currentError && (
           <div className="error-message" style={defaultStyles.errorMessage}>
-            {currentError.message}
+            {typeof currentError === 'string' ? currentError : currentError.message}
           </div>
         )}
 

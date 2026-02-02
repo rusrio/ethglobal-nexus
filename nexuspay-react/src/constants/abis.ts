@@ -17,12 +17,14 @@ export const NEXUS_VAULT_ABI = [
   },
   {
     type: 'function',
-    name: 'handleCctpPayment',
+    name: 'handleReceiveFinalizedMessage',
     inputs: [
-      { name: 'message', type: 'bytes' },
-      { name: 'attestation', type: 'bytes' },
+      { name: 'sourceDomain', type: 'uint32' },
+      { name: 'sender', type: 'bytes32' },
+      { name: 'finalityThresholdExecuted', type: 'uint32' },
+      { name: 'messageBody', type: 'bytes' },
     ],
-    outputs: [],
+    outputs: [{ name: 'success', type: 'bool' }],
     stateMutability: 'nonpayable',
   },
 ] as const;
@@ -73,9 +75,12 @@ export const TOKEN_MESSENGER_ABI = [
       { name: 'mintRecipient', type: 'bytes32' },
       { name: 'burnToken', type: 'address' },
       { name: 'destinationCaller', type: 'bytes32' },
+      { name: 'maxFee', type: 'uint256' },
+      { name: 'minFinalityThreshold', type: 'uint32' },
       { name: 'hookData', type: 'bytes' },
     ],
     outputs: [{ name: 'nonce', type: 'uint64' }],
     stateMutability: 'nonpayable',
   },
 ] as const;
+
