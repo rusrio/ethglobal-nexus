@@ -6,11 +6,6 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
 import {IMessageHandlerV2} from "./interfaces/IMessageHandlerV2.sol";
 
-interface IMessageTransmitter {
-    function receiveMessage(bytes calldata message, bytes calldata attestation) 
-        external 
-        returns (bool success);
-}
 
 contract NexusVault is IMessageHandlerV2, IERC165 {
     using SafeERC20 for IERC20;
@@ -26,7 +21,6 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
 
     // --- State Variables ---
     IERC20 public immutable USDC;
-    IMessageTransmitter public immutable MESSAGE_TRANSMITTER;
     
     mapping(uint256 campaignId => CampaignParams) public campaigns;
     uint256 public nextCampaignId;
@@ -74,9 +68,8 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
     error NexusVault__InvalidMessageFormat();
     error NexusVault__CCTPReceiveFailed();
 
-    constructor(address _usdc, address _messageTransmitter) {
+    constructor(address _usdc) {
         USDC = IERC20(_usdc);
-        MESSAGE_TRANSMITTER = IMessageTransmitter(_messageTransmitter);
     }
 
     /**
@@ -147,12 +140,8 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
         uint32 finalityThresholdExecuted,
         bytes calldata messageBody
     ) external override returns (bool) {
-        // Allow calls from MessageTransmitter or NexusPayRelay
-        require(
-            msg.sender == address(MESSAGE_TRANSMITTER) || 
-            msg.sender == nexusPayRelay,
-            "Unauthorized caller"
-        );
+        // Only NexusPayRelay can call this function
+        require(msg.sender == nexusPayRelay, "Only relay can call");
         
         uint256 amount = _extractAmountFromBurnMessage(messageBody);
         bytes memory hookData = _extractHookDataFromBurnMessage(messageBody);
@@ -163,11 +152,17 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
             (address, string)
         );
 
-        _processPay(amount, merchant, orderId);
+        // Deduct CCTP protocol fee (0.02 USDC = 20000 wei in 6 decimals)
+        // The user pays amount + fee, but merchant receives only amount
+        uint256 protocolFee = 20000; // 0.02 USDC
+        require(amount > protocolFee, "Amount too small to cover fee");
+        uint256 merchantAmount = amount - protocolFee;
+
+        _processPay(merchantAmount, merchant, orderId);
         
         emit CCTPPaymentProcessed(
             merchant,
-            amount,
+            merchantAmount, // Event shows merchant amount (without fee)
             orderId,
             keccak256(abi.encodePacked(sourceDomain, sender, messageBody))
         );
@@ -208,27 +203,6 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
         emit PaymentReceived(merchant, amount, orderId);
     }
 
-
-    function _extractHookData(bytes calldata message) internal pure returns (bytes memory) {
-        uint256 hookDataStart = 148 + 228; // 376
-        
-        if (message.length <= hookDataStart) {
-            revert NexusVault__InvalidMessageFormat();
-        }
-        
-        return message[hookDataStart:];
-    }
-
-    function _extractAmount(bytes calldata message) internal pure returns (uint256) {
-
-        uint256 amountOffset = 148 + 68;
-        
-        if (message.length < amountOffset + 32) {
-            revert NexusVault__InvalidMessageFormat();
-        }
-        
-        return abi.decode(message[amountOffset:amountOffset + 32], (uint256));
-    }
 
     /**
      * @notice Extracts hookData from BurnMessage

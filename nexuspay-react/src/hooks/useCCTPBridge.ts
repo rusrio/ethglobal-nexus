@@ -66,22 +66,23 @@ export function useCCTPBridge() {
       const destinationDomain = CCTP_CONTRACTS[ARC_TESTNET_CHAIN_ID].domain;
       const mintRecipient = addressToBytes32(NEXUS_VAULT_ADDRESS);
 
-      // Circle requires a minimum fee even for manual relay (~0.02 USDC)
-      // This is the CCTP protocol fee, NOT Forwarding Service fee
-      const protocolFee = 0n; // No fee for standard transfer
-      const totalAmountToBurn = params.amount;
+      // Circle requires a minimum fee for fast attestation (~0.02 USDC)
+      // This fee is mandatory to avoid "insufficient_fee" delay
+      // The fee will be deducted in NexusVault before crediting merchant
+      const protocolFee = 20000n; // 0.02 USDC
+      const totalAmountToBurn = params.amount + protocolFee;
 
       const burnTxHash = await writeContractAsync({
         address: chainConfig.tokenMessenger,
         abi: TOKEN_MESSENGER_ABI,
         functionName: 'depositForBurnWithHook',
         args: [
-          totalAmountToBurn, // Payment only
+          totalAmountToBurn, // Payment + protocol fee
           destinationDomain,
           mintRecipient,
           chainConfig.usdc,
           '0x0000000000000000000000000000000000000000000000000000000000000000' as `0x${string}`, // destinationCaller = 0
-          protocolFee, // maxFee = 0
+          protocolFee, // maxFee for Circle protocol fee
           1000, // minFinalityThreshold
           hookData, // merchant + orderId
         ],
@@ -100,28 +101,49 @@ export function useCCTPBridge() {
         throw new Error('Failed to get attestation from Circle');
       }
 
-      setCurrentStep('Switching to Arc Testnet...');
+      setCurrentStep('Finalizing payment on Arc (automatic)...');
       
-      // Switch to Arc Test network before calling receiveMessage
-      await switchChainAsync({ chainId: ARC_TESTNET_CHAIN_ID });
+      // Automatic relay using operator wallet (no user interaction needed)
+      // User doesn't need Arc Testnet in their wallet - merchant pays the gas
+      const operatorPrivateKey = params.operatorPrivateKey;
+      
+      if (!operatorPrivateKey || operatorPrivateKey === '0x') {
+        throw new Error('Operator private key not configured');
+      }
 
-      setCurrentStep('Calling NexusPayRelay on Arc Testnet...');
+      // Create operator account from private key
+      const operatorAccount = privateKeyToAccount(operatorPrivateKey);
       
-      // Call relayPayment on NexusPayRelay (instead of MessageTransmitter directly)
-      // This ensures both USDC mint AND hook execution happen atomically
-      const receiveTxHash = await writeContractAsync({
+      // Create wallet client for Arc Testnet with operator account
+      const { createWalletClient, http } = await import('viem');
+      const arcWalletClient = createWalletClient({
+        account: operatorAccount,
+        chain: {
+          id: ARC_TESTNET_CHAIN_ID,
+          name: 'Arc Testnet',
+          network: 'arc-testnet',
+          nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+          rpcUrls: {
+            default: { http: ['https://rpc.testnet.arc.network'] },
+            public: { http: ['https://rpc.testnet.arc.network'] },
+          },
+        } as any,
+        transport: http('https://rpc.testnet.arc.network'),
+      });
+
+      // Call relayPayment on NexusPayRelay (merchant/operator pays Arc gas)
+      const receiveTxHash = await arcWalletClient.writeContract({
         address: NEXUS_PAY_RELAY_ADDRESS,
         abi: NEXUS_PAY_RELAY_ABI,
         functionName: 'relayPayment',
         args: [attestation.message, attestation.attestation],
-        chain: { id: ARC_TESTNET_CHAIN_ID } as any,
-        gas: 500000n, // Explicit gas limit
+        gas: 500000n,
       });
 
       console.log('Receive tx:', receiveTxHash);
 
       setStatus('success');
-      setCurrentStep('Payment completed! Merchant balance updated on Arc.');
+      setCurrentStep('Payment completed! Merchant balance updated automatically.');
       
       return {
         burnTxHash,

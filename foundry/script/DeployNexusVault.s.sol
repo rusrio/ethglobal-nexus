@@ -14,7 +14,7 @@ contract DeployNexusVault is Script {
         
         vm.startBroadcast(deployerPrivateKey);
 
-        NexusVault vault = new NexusVault(usdcAddress, messageTransmitterAddress);
+        NexusVault vault = new NexusVault(usdcAddress);
 
         console.log("NexusVault deployed to:", address(vault));
         console.log("USDC Address:", usdcAddress);

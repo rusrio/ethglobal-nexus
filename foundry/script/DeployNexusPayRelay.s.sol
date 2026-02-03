@@ -8,7 +8,7 @@ import {NexusVault} from "../src/NexusVault.sol";
 contract DeployNexusPayRelay is Script {
     // Arc Testnet addresses
     address constant MESSAGE_TRANSMITTER = 0xE737e5cEBEEBa77EFE34D4aa090756590b1CE275;
-    address constant NEXUS_VAULT = 0xc49B655c336c597b667923968aD87925cc9Db24f;
+    address constant NEXUS_VAULT = 0xd212F75CA5592244673C27664A8e8332D45f023E;
 
     function run() external {
         uint256 deployerPrivateKey = vm.envUint("DEPLOY_PRIVATE_KEY");
