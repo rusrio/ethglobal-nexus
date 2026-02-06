@@ -11,7 +11,6 @@ interface INexusVault {
     function handleReceiveFinalizedMessage(
         uint32 sourceDomain,
         bytes32 sender,
-        uint32 finalityThresholdExecuted,
         bytes calldata messageBody
     ) external returns (bool);
 }
@@ -54,14 +53,13 @@ contract NexusPayRelay {
         (
             uint32 sourceDomain,
             bytes32 sender,
-            uint32 finalityThresholdExecuted,
+            /*uint32 finalityThresholdExecuted*/,
             bytes memory messageBody
         ) = _parseCCTPMessage(message);
 
         bool hookSuccess = NEXUS_VAULT.handleReceiveFinalizedMessage(
             sourceDomain,
             sender,
-            finalityThresholdExecuted,
             messageBody
         );
 

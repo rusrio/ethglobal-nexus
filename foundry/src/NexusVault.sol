@@ -3,11 +3,10 @@ pragma solidity ^0.8.20;
 
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
-import {IERC165} from "@openzeppelin/contracts/utils/introspection/IERC165.sol";
-import {IMessageHandlerV2} from "./interfaces/IMessageHandlerV2.sol";
 
 
-contract NexusVault is IMessageHandlerV2, IERC165 {
+
+contract NexusVault {
     using SafeERC20 for IERC20;
 
     // --- Structs ---
@@ -67,18 +66,13 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
     error NexusVault__RewardLimitReached();
     error NexusVault__InvalidMessageFormat();
     error NexusVault__CCTPReceiveFailed();
+    error NexusVault__OnlyRelay();
+    error NexusVault__UnfinalizedMessagesNotSupported();
+    error NexusVault__AmountTooSmallToCoverFee();
+    error NexusVault__NotCampaignOwner();
 
     constructor(address _usdc) {
         USDC = IERC20(_usdc);
-    }
-
-    /**
-     * @notice ERC165 interface detection
-     * @dev Required for MessageTransmitter to detect IMessageHandlerV2 support
-     */
-    function supportsInterface(bytes4 interfaceId) external pure override returns (bool) {
-        return interfaceId == type(IMessageHandlerV2).interfaceId || 
-               interfaceId == type(IERC165).interfaceId;
     }
 
     // --- External Functions ---
@@ -89,8 +83,8 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
      * @param _relay Address of the NexusPayRelay contract
      */
     function setNexusPayRelay(address _relay) external {
-        require(nexusPayRelay == address(0), "Relay already set");
-        require(_relay != address(0), "Invalid relay address");
+        require(nexusPayRelay == address(0), NexusVault__OnlyRelay());
+        require(_relay != address(0), NexusVault__InvalidMessageFormat());
         nexusPayRelay = _relay;
     }
 
@@ -102,7 +96,7 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
         if (referrerPct > 100) revert NexusVault__InvalidSplit();
         if (rewardLimit == 0) revert NexusVault__InvalidAmount();
 
-        campaignId = nextCampaignId++;
+        campaignId = ++nextCampaignId;
         campaigns[campaignId] = CampaignParams({
             referrerPct: referrerPct,
             merchant: msg.sender,
@@ -119,6 +113,37 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
         );
     }
 
+    /**
+     * @notice Toggle campaign active status
+     * @param campaignId ID of the campaign
+     * @param isActive New active status
+     */
+    function toggleCampaign(uint256 campaignId, bool isActive) external {
+        CampaignParams storage campaign = campaigns[campaignId];
+        require(campaign.merchant == msg.sender, NexusVault__NotCampaignOwner());
+        campaign.isActive = isActive;
+    }
+
+    /**
+     * @notice Update campaign parameters
+     * @param campaignId ID of the campaign
+     * @param referrerPct New referrer percentage
+     * @param rewardLimit New reward limit
+     */
+    function updateCampaign(
+        uint256 campaignId,
+        uint256 referrerPct,
+        uint256 rewardLimit
+    ) external {
+        CampaignParams storage campaign = campaigns[campaignId];
+        require(campaign.merchant == msg.sender, NexusVault__NotCampaignOwner());
+        if (referrerPct > 100) revert NexusVault__InvalidSplit();
+        if (rewardLimit == 0) revert NexusVault__InvalidAmount();
+        
+        campaign.referrerPct = referrerPct;
+        campaign.rewardLimit = rewardLimit;
+    }
+
     // Standard payment (no referral), and no cross-chain (direct payment)
     function pay(
         uint256 amount,
@@ -130,18 +155,14 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
         USDC.safeTransferFrom(msg.sender, address(this), amount);
         _processPay(amount, merchant, orderId);
     }
-
-    //TODO payWithReferral()
-
     
     function handleReceiveFinalizedMessage(
         uint32 sourceDomain,
         bytes32 sender,
-        uint32 finalityThresholdExecuted,
         bytes calldata messageBody
-    ) external override returns (bool) {
+    ) external returns (bool) {
         // Only NexusPayRelay can call this function
-        require(msg.sender == nexusPayRelay, "Only relay can call");
+        require(msg.sender == nexusPayRelay, NexusVault__OnlyRelay());
         
         uint256 amount = _extractAmountFromBurnMessage(messageBody);
         bytes memory hookData = _extractHookDataFromBurnMessage(messageBody);
@@ -155,10 +176,28 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
         // Deduct CCTP protocol fee (0.02 USDC = 20000 wei in 6 decimals)
         // The user pays amount + fee, but merchant receives only amount
         uint256 protocolFee = 20000; // 0.02 USDC
-        require(amount > protocolFee, "Amount too small to cover fee");
+        require(amount > protocolFee, NexusVault__AmountTooSmallToCoverFee());
         uint256 merchantAmount = amount - protocolFee;
 
-        _processPay(merchantAmount, merchant, orderId);
+        address referrer = address(0);
+        uint256 campaignId = 0;
+        
+        if (hookData.length > 64) {
+            try this.decodeReferralParams(hookData) returns (address _m, string memory /*_o*/, uint256 _c, address _r) {
+                 if (_m == merchant) { // Should match
+                     campaignId = _c;
+                     referrer = _r;
+                 }
+            } catch {
+                // formatting differs, ignore referral
+            }
+        }
+
+        if (campaignId > 0 && referrer != address(0)) {
+            _processPayWithReferral(merchantAmount, merchant, orderId, campaignId, referrer);
+        } else {
+            _processPay(merchantAmount, merchant, orderId);
+        }
         
         emit CCTPPaymentProcessed(
             merchant,
@@ -168,18 +207,6 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
         );
         
         return true;
-    }
-
-    /**
-     * @notice Handles unfinalized messages (not supported for security)
-     */
-    function handleReceiveUnfinalizedMessage(
-        uint32 sourceDomain,
-        bytes32 sender,
-        uint32 finalityThresholdExecuted,
-        bytes calldata messageBody
-    ) external override returns (bool) {
-        revert("Unfinalized messages not supported");
     }
 
     // Withdraw merchant earnings to their wallet (on Arc Testnet)
@@ -194,6 +221,13 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
     }
 
     // --- Internal Functions ---
+
+    /**
+     * @notice Processes a payment
+     * @param amount The net payment amount (after protocol fees)
+     * @param merchant The merchant address receiving the payment
+     * @param orderId The unique order identifier
+     */
     function _processPay(
         uint256 amount,
         address merchant,
@@ -203,6 +237,61 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
         emit PaymentReceived(merchant, amount, orderId);
     }
 
+    /**
+     * @notice Processes a payment that includes referral information
+     * @dev Calculates the referral reward based on campaign settings.
+     * @param amount The net payment amount (after protocol fees)
+     * @param merchant The merchant address receiving the payment
+     * @param orderId The unique order identifier
+     * @param campaignId The ID of the referral campaign
+     * @param referrer The address of the referrer to be rewarded
+     */
+    function _processPayWithReferral(
+        uint256 amount,
+        address merchant,
+        string memory orderId,
+        uint256 campaignId,
+        address referrer
+    ) internal {
+        CampaignParams storage campaign = campaigns[campaignId];
+
+        if (!campaign.isActive) {
+             _processPay(amount, merchant, orderId);
+             return;
+        }
+        if (campaign.merchant != merchant) {
+             _processPay(amount, merchant, orderId);
+             return;
+        }
+        
+        uint256 referralReward = (amount * campaign.referrerPct) / 100;
+        
+        if (campaign.totalRewarded + referralReward > campaign.rewardLimit) {
+            uint256 remaining = campaign.rewardLimit > campaign.totalRewarded 
+                ? campaign.rewardLimit - campaign.totalRewarded 
+                : 0;
+            referralReward = remaining;
+        }
+
+        campaign.totalRewarded += referralReward;
+        uint256 merchantShare = amount - referralReward;
+
+        merchantBalances[merchant] += merchantShare;
+        if (referralReward > 0) {
+            USDC.safeTransfer(referrer, referralReward);
+        }
+
+        emit PaymentReceived(merchant, merchantShare, orderId);
+        emit RewardPaid(campaignId, referrer, referralReward);
+    }
+
+    /** 
+     * @notice Helper to decode params with referral
+     * @dev Made external so we can use try/catch in this contract context
+     */
+    function decodeReferralParams(bytes memory data) external pure returns (address, string memory, uint256, address) {
+        return abi.decode(data, (address, string, uint256, address));
+    }
 
     /**
      * @notice Extracts hookData from BurnMessage
@@ -216,7 +305,6 @@ contract NexusVault is IMessageHandlerV2, IERC165 {
             revert NexusVault__InvalidMessageFormat();
         }
         
-        // Hook Data is everything after offset 228
         return messageBody[hookDataOffset:];
     }
 
