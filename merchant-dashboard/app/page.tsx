@@ -1,6 +1,7 @@
 'use client';
 
 import Link from 'next/link';
+import Image from 'next/image';
 
 export default function LandingPage() {
   return (
@@ -17,10 +18,14 @@ export default function LandingPage() {
           <div className="flex items-center gap-3">
             <div className="relative group">
               <div className="absolute inset-0 bg-cyan-500 blur-xl opacity-40 group-hover:opacity-60 transition-opacity"></div>
-              <div className="relative w-10 h-10 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center">
-                <svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                </svg>
+              <div className="relative w-10 h-10 rounded-2xl overflow-hidden flex items-center justify-center">
+                <Image 
+                  src="/nexus-logo.png" 
+                  alt="Nexus Logo" 
+                  width={40} 
+                  height={40} 
+                  className="object-cover"
+                />
               </div>
             </div>
             <span className="text-lg font-bold text-white">Nexus</span>
@@ -106,7 +111,7 @@ export default function LandingPage() {
                       </svg>
                     </div>
                     <div className="text-xs text-cyan-400 font-semibold mb-1">SOURCE</div>
-                    <div className="text-xl font-bold text-white mb-2">Sepolia</div>
+                    <div className="text-xl font-bold text-white mb-2">Any chain</div>
                     <div className="text-sm text-gray-400">100 USDC</div>
                   </div>
 
@@ -212,11 +217,18 @@ export default function LandingPage() {
                 </div>
                 <pre className="text-sm leading-loose font-mono text-gray-300">
 {`<NexusPayment
-  merchantAddress="0x..."
-  productName="Premium"
-  amount={99.99}
-  orderId="ORD-123"
-/>`}
+       merchantAddress=0x...
+       amount=1000000n
+       operatorPrivateKey=0x...
+       mode="fixed" 
+       orderId={getOrderId()} 
+       amountLabel="PAYMENT AMOUNT" 
+       buttonText="Pay Now" 
+       className="my-custom-class"
+       onSuccess={(tx, amount) => console.log('Paid!', tx)}
+       onClose={() => console.log('Closed')}
+       onError={(err) => console.error(err)}
+    />`}
                 </pre>
               </div>
             </div>
@@ -251,10 +263,14 @@ export default function LandingPage() {
           <div className="grid grid-cols-2 md:grid-cols-5 gap-12 mb-12">
             <div className="col-span-2">
               <div className="flex items-center gap-3 mb-4">
-                <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-cyan-500 to-blue-600 flex items-center justify-center">
-                  <svg className="w-6 h-6 text-white" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M13 10V3L4 14h7v7l9-11h-7z" />
-                  </svg>
+                <div className="relative w-10 h-10 rounded-2xl overflow-hidden flex items-center justify-center">
+                  <Image 
+                    src="/nexus-logo.png" 
+                    alt="Nexus Logo" 
+                    width={40} 
+                    height={40} 
+                    className="object-cover"
+                  />
                 </div>
                 <span className="text-lg font-bold text-white">NexusPay</span>
               </div>

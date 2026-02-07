@@ -11,12 +11,9 @@ interface AuthGuardProps {
   requireMerchant?: boolean;
 }
 
-export function AuthGuard({ children, requireMerchant = true }: AuthGuardProps) {
+export function AuthGuard({ children, requireMerchant = false }: AuthGuardProps) { /* requireMerchant false for showcase, in production, merchant addresses will be approved from an api/backend*/
   const { address, isConnected } = useAccount();
   const { disconnect } = useDisconnect();
-
-  // Removed auto-disconnect to allow non-merchant users to stay connected
-  // and view allowed pages (like Referrals)
 
   if (!isConnected) {
     return (
