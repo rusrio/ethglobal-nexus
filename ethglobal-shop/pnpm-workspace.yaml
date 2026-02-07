@@ -1,0 +1,6 @@
+ignoredBuiltDependencies:
+  - sharp
+  - unrs-resolver
+
+overrides:
+  '@nexuspay/react': link:../nexuspay-react
