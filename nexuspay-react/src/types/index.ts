@@ -53,6 +53,11 @@ export interface NexusPaymentProps {
   onSuccess?: (txHash: string, amount: bigint) => void;
   onError?: (error: Error) => void;
   onStatusChange?: (status: PaymentStatus) => void;
+  /** Optional callback when user closes the success view */
+  onClose?: () => void;
+  // Referral
+  referralCampaignId?: number | bigint;
+  referrerAddress?: string;
 }
 
 /**

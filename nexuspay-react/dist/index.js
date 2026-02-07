@@ -1,7 +1,7 @@
 "use client";
 
 // src/components/NexusPayment.tsx
-import { useState as useState3 } from "react";
+import { useState as useState3, useEffect } from "react";
 
 // src/constants/contracts.ts
 var CCTP_CONTRACTS = {
@@ -38,7 +38,40 @@ var CCTP_CONTRACTS = {
     name: "Arc Testnet"
   }
 };
-var NEXUS_VAULT_ADDRESS = "0xfC159e07f19aCd1d17575febCB285175206FB792";
+var NEXUS_VAULT_ADDRESS = "0x05949CFfCE00B0032194cb7B8f8e72bBF1376012";
+var NEXUS_PAY_RELAY_ADDRESS = "0xCDe4188f4bB253dc5f896bDd230B8b56Dff37386";
+var NEXUS_PAY_RELAY_ABI = [
+  {
+    type: "function",
+    name: "relayPayment",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "message", type: "bytes" },
+      { name: "attestation", type: "bytes" }
+    ],
+    outputs: [{ type: "bool" }]
+  },
+  {
+    type: "function",
+    name: "getConfiguration",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [
+      { name: "messageTransmitter", type: "address" },
+      { name: "nexusVault", type: "address" }
+    ]
+  },
+  {
+    type: "event",
+    name: "PaymentRelayed",
+    inputs: [
+      { name: "messageHash", type: "bytes32", indexed: true },
+      { name: "merchant", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+      { name: "sourceDomain", type: "uint32", indexed: false }
+    ]
+  }
+];
 var ARC_TESTNET_CHAIN_ID = 5042002;
 
 // src/components/NexusPayment.tsx
@@ -126,20 +159,26 @@ var TOKEN_MESSENGER_ABI = [
 // src/hooks/useDirectPayment.ts
 function useDirectPayment() {
   const [status, setStatus] = useState("idle");
+  const [currentStep, setCurrentStep] = useState("");
   const [error, setError] = useState(null);
   const { writeContractAsync } = useWriteContract();
   const executePayment = async (params) => {
     try {
+      if (!params || !params.amount) throw new Error("Invalid parameters");
       setError(null);
       setStatus("approving");
-      const approveTxHash = await writeContractAsync({
+      setCurrentStep("Approving USDC transfer...");
+      await writeContractAsync({
         address: params.usdcAddress,
         abi: USDC_ABI,
         functionName: "approve",
         args: [NEXUS_VAULT_ADDRESS, params.amount]
       });
       setStatus("approving");
-      setStatus("finalizing");
+      setCurrentStep("Waiting for approval confirmation...");
+      await new Promise((resolve) => setTimeout(resolve, 2e3));
+      setStatus("burning");
+      setCurrentStep("Finalizing payment on Arc...");
       const payTxHash = await writeContractAsync({
         address: NEXUS_VAULT_ADDRESS,
         abi: NEXUS_VAULT_ABI,
@@ -147,17 +186,20 @@ function useDirectPayment() {
         args: [params.amount, params.merchant, params.orderId]
       });
       setStatus("success");
+      setCurrentStep("Payment Successful!");
       return payTxHash;
     } catch (err) {
       const error2 = err instanceof Error ? err : new Error("Payment failed");
       setError(error2);
       setStatus("error");
+      setCurrentStep("Failed");
       throw error2;
     }
   };
   return {
     executePayment,
     status,
+    currentStep,
     error,
     isLoading: status !== "idle" && status !== "success" && status !== "error"
   };
@@ -167,6 +209,7 @@ function useDirectPayment() {
 import { useState as useState2 } from "react";
 import { useWriteContract as useWriteContract2, usePublicClient, useSwitchChain, useAccount } from "wagmi";
 import { parseAbiParameters, encodeAbiParameters } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
 // src/utils/cctp.ts
 function addressToBytes32(address) {
@@ -192,24 +235,33 @@ function useCCTPBridge() {
       }
       setStatus("approving");
       setCurrentStep("Approving USDC...");
+      const protocolFee = 20000n;
+      const totalAmountToBurn = params.amount + protocolFee;
       const approveTxHash = await writeContractAsync({
         address: chainConfig.usdc,
         abi: USDC_ABI,
         functionName: "approve",
-        args: [chainConfig.tokenMessenger, params.amount]
+        args: [chainConfig.tokenMessenger, totalAmountToBurn]
       });
       console.log("Approval tx:", approveTxHash);
       setStatus("burning");
       setCurrentStep("Preparing hook data...");
-      const hookData = encodeAbiParameters(
-        parseAbiParameters("address, string"),
-        [params.merchant, params.orderId]
-      );
+      let hookData;
+      if (params.campaignId && params.referrer && Number(params.campaignId) > 0) {
+        console.log("Encoding referral data:", params.campaignId, params.referrer);
+        hookData = encodeAbiParameters(
+          parseAbiParameters("address, string, uint256, address"),
+          [params.merchant, params.orderId, BigInt(params.campaignId), params.referrer]
+        );
+      } else {
+        hookData = encodeAbiParameters(
+          parseAbiParameters("address, string"),
+          [params.merchant, params.orderId]
+        );
+      }
       setCurrentStep("Burning USDC on source chain...");
       const destinationDomain = CCTP_CONTRACTS[ARC_TESTNET_CHAIN_ID].domain;
       const mintRecipient = addressToBytes32(NEXUS_VAULT_ADDRESS);
-      const protocolFee = 20000n;
-      const totalAmountToBurn = params.amount + protocolFee;
       const burnTxHash = await writeContractAsync({
         address: chainConfig.tokenMessenger,
         abi: TOKEN_MESSENGER_ABI,
@@ -223,7 +275,7 @@ function useCCTPBridge() {
           "0x0000000000000000000000000000000000000000000000000000000000000000",
           // destinationCaller = 0
           protocolFee,
-          // maxFee for Circle protocol fee (NOT forwarding fee)
+          // maxFee for Circle protocol fee
           1e3,
           // minFinalityThreshold
           hookData
@@ -239,31 +291,37 @@ function useCCTPBridge() {
       if (!attestation) {
         throw new Error("Failed to get attestation from Circle");
       }
-      setCurrentStep("Switching to Arc Testnet...");
-      await switchChainAsync({ chainId: ARC_TESTNET_CHAIN_ID });
-      setCurrentStep("Calling receiveMessage on Arc Testnet...");
-      const arcConfig = CCTP_CONTRACTS[ARC_TESTNET_CHAIN_ID];
-      const receiveTxHash = await writeContractAsync({
-        address: arcConfig.messageTransmitter,
-        abi: [{
-          type: "function",
-          name: "receiveMessage",
-          stateMutability: "nonpayable",
-          inputs: [
-            { name: "message", type: "bytes" },
-            { name: "attestation", type: "bytes" }
-          ],
-          outputs: [{ type: "bool" }]
-        }],
-        functionName: "receiveMessage",
+      setCurrentStep("Finalizing payment on Arc (automatic)...");
+      const operatorPrivateKey = params.operatorPrivateKey;
+      if (!operatorPrivateKey || operatorPrivateKey === "0x") {
+        throw new Error("Operator private key not configured");
+      }
+      const operatorAccount = privateKeyToAccount(operatorPrivateKey);
+      const { createWalletClient, http } = await import("viem");
+      const arcWalletClient = createWalletClient({
+        account: operatorAccount,
+        chain: {
+          id: ARC_TESTNET_CHAIN_ID,
+          name: "Arc Testnet",
+          network: "arc-testnet",
+          nativeCurrency: { name: "Ether", symbol: "ETH", decimals: 18 },
+          rpcUrls: {
+            default: { http: ["https://rpc.testnet.arc.network"] },
+            public: { http: ["https://rpc.testnet.arc.network"] }
+          }
+        },
+        transport: http("https://rpc.testnet.arc.network")
+      });
+      const receiveTxHash = await arcWalletClient.writeContract({
+        address: NEXUS_PAY_RELAY_ADDRESS,
+        abi: NEXUS_PAY_RELAY_ABI,
+        functionName: "relayPayment",
         args: [attestation.message, attestation.attestation],
-        chain: { id: ARC_TESTNET_CHAIN_ID },
         gas: 500000n
-        // Explicit gas limit
       });
       console.log("Receive tx:", receiveTxHash);
       setStatus("success");
-      setCurrentStep("Payment completed! Merchant balance updated on Arc.");
+      setCurrentStep("Payment completed! Merchant balance updated automatically.");
       return {
         burnTxHash,
         receiveTxHash,
@@ -308,8 +366,304 @@ async function pollForAttestation(txHash, sourceDomain, maxAttempts = 20) {
   return null;
 }
 
+// src/components/NexusPayment.styles.ts
+var styles = {
+  container: {
+    fontFamily: '"Geist", "Inter", sans-serif',
+    maxWidth: "420px",
+    margin: "0 auto",
+    background: "rgba(255, 255, 255, 0.95)",
+    borderRadius: "24px",
+    boxShadow: "0 25px 50px -12px rgba(0, 0, 0, 0.15), 0 0 0 1px rgba(0,0,0,0.02)",
+    padding: "32px",
+    position: "relative",
+    overflow: "hidden",
+    backdropFilter: "blur(10px)"
+  },
+  header: {
+    display: "flex",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: "40px"
+  },
+  logoRow: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px"
+  },
+  logoIcon: {
+    width: "24px",
+    height: "24px",
+    background: "#111",
+    color: "#fff",
+    borderRadius: "6px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+    fontWeight: "bold",
+    fontSize: "14px"
+  },
+  logoText: {
+    fontSize: "16px",
+    fontWeight: "600",
+    color: "#111",
+    letterSpacing: "-0.5px"
+  },
+  walletBadge: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    padding: "6px 12px",
+    background: "#f3f4f6",
+    borderRadius: "20px"
+  },
+  walletAvatar: {
+    width: "16px",
+    height: "16px",
+    borderRadius: "50%"
+  },
+  walletAddress: {
+    fontSize: "12px",
+    fontWeight: "500",
+    color: "#4b5563",
+    fontFamily: "monospace"
+  },
+  disconnectedBadge: {
+    fontSize: "12px",
+    color: "#ef4444",
+    background: "#fef2f2",
+    padding: "4px 10px",
+    borderRadius: "20px",
+    fontWeight: "600"
+  },
+  amountSection: {
+    marginBottom: "40px",
+    textAlign: "center"
+  },
+  label: {
+    fontSize: "11px",
+    textTransform: "uppercase",
+    letterSpacing: "1px",
+    color: "#9ca3af",
+    fontWeight: "600",
+    marginBottom: "12px",
+    display: "block"
+  },
+  hugeDisplay: {
+    fontSize: "48px",
+    fontWeight: "700",
+    color: "#111",
+    letterSpacing: "-2px"
+  },
+  inputWrapper: {
+    position: "relative",
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "baseline"
+  },
+  currencyPrefix: {
+    fontSize: "32px",
+    color: "#d1d5db",
+    fontWeight: "500",
+    marginRight: "4px"
+  },
+  hugeInput: {
+    fontSize: "56px",
+    fontWeight: "700",
+    color: "#111",
+    border: "none",
+    background: "transparent",
+    textAlign: "center",
+    width: "240px",
+    letterSpacing: "-2px",
+    outline: "none"
+  },
+  currencySymbol: {
+    fontSize: "16px",
+    fontWeight: "600",
+    color: "#9ca3af",
+    marginLeft: "8px"
+  },
+  actionSection: {
+    marginTop: "auto"
+  },
+  networkInfo: {
+    textAlign: "center",
+    fontSize: "12px",
+    color: "#6b7280",
+    marginBottom: "16px",
+    display: "flex",
+    justifyContent: "center",
+    alignItems: "center",
+    gap: "6px"
+  },
+  networkDot: {
+    width: "6px",
+    height: "6px",
+    background: "#10b981",
+    borderRadius: "50%",
+    boxShadow: "0 0 0 2px rgba(16, 185, 129, 0.2)"
+  },
+  payButton: {
+    width: "100%",
+    height: "56px",
+    background: "#111",
+    color: "#fff",
+    border: "none",
+    borderRadius: "16px",
+    fontSize: "16px",
+    fontWeight: "600",
+    cursor: "pointer",
+    transition: "all 0.2s",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  payButtonDisabled: {
+    background: "#e5e7eb",
+    color: "#9ca3af",
+    cursor: "not-allowed"
+  },
+  loadingSpinner: {
+    width: "20px",
+    height: "20px",
+    border: "2px solid rgba(255,255,255,0.3)",
+    borderTopColor: "#fff",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite"
+  },
+  stepperContainer: {
+    background: "#f9fafb",
+    borderRadius: "16px",
+    padding: "24px",
+    marginBottom: "24px"
+  },
+  stepperTrack: {
+    display: "flex",
+    justifyContent: "space-between",
+    position: "relative",
+    marginBottom: "16px"
+  },
+  stepItem: {
+    display: "flex",
+    flexDirection: "column",
+    alignItems: "center",
+    zIndex: 1,
+    position: "relative"
+  },
+  stepDot: {
+    width: "24px",
+    height: "24px",
+    borderRadius: "50%",
+    background: "#fff",
+    border: "2px solid #e5e7eb",
+    marginBottom: "8px",
+    transition: "all 0.3s ease",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center"
+  },
+  stepDotActive: {
+    borderColor: "#3b82f6",
+    boxShadow: "0 0 0 4px rgba(59, 130, 246, 0.1)"
+  },
+  stepDotCompleted: {
+    background: "#3b82f6",
+    borderColor: "#3b82f6",
+    color: "#fff"
+  },
+  stepLabel: {
+    fontSize: "10px",
+    fontWeight: "600",
+    color: "#9ca3af",
+    textTransform: "uppercase"
+  },
+  stepLabelActive: {
+    color: "#3b82f6"
+  },
+  checkmark: {
+    fontSize: "12px",
+    fontWeight: "bold"
+  },
+  stepMessage: {
+    textAlign: "center",
+    fontSize: "13px",
+    color: "#4b5563",
+    fontWeight: "500"
+  },
+  errorBox: {
+    background: "#fef2f2",
+    color: "#dc2626",
+    padding: "16px",
+    borderRadius: "12px",
+    fontSize: "13px",
+    marginBottom: "24px",
+    textAlign: "center"
+  },
+  successBox: {
+    background: "#f0fdf4",
+    color: "#16a34a",
+    padding: "16px",
+    borderRadius: "12px",
+    fontSize: "13px",
+    marginBottom: "24px",
+    textAlign: "center"
+  },
+  link: {
+    color: "#16a34a",
+    fontWeight: "700",
+    marginLeft: "6px",
+    textDecoration: "underline"
+  },
+  stepDotSpinner: {
+    width: "14px",
+    height: "14px",
+    border: "2px solid rgba(59, 130, 246, 0.2)",
+    borderTopColor: "#3b82f6",
+    borderRadius: "50%",
+    animation: "spin 1s linear infinite"
+  }
+};
+
 // src/components/NexusPayment.tsx
-import { Fragment, jsx, jsxs } from "react/jsx-runtime";
+import { jsx, jsxs } from "react/jsx-runtime";
+var PaymentStepper = ({ currentStep, status }) => {
+  const getStepIndex = () => {
+    if (status === "success") return 3;
+    if (status === "error") return -1;
+    if (status === "approving") return 0;
+    if (currentStep.includes("Burning") || currentStep.includes("attestation") || currentStep.includes("Waiting") || currentStep.includes("Finalizing")) return 1;
+    return 0;
+  };
+  const activeIndex = getStepIndex();
+  const steps = ["APPROVE", "TRANSFER", "PAID"];
+  return /* @__PURE__ */ jsxs("div", { style: styles.stepperContainer, children: [
+    /* @__PURE__ */ jsx("style", { children: `@keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }` }),
+    /* @__PURE__ */ jsx("div", { style: styles.stepperTrack, children: steps.map((label, index) => {
+      let isActive = false;
+      let isCompleted = false;
+      if (index < activeIndex) {
+        isCompleted = true;
+      } else if (index === activeIndex) {
+        isActive = true;
+      }
+      return /* @__PURE__ */ jsxs("div", { style: styles.stepItem, children: [
+        /* @__PURE__ */ jsxs("div", { style: {
+          ...styles.stepDot,
+          ...isActive ? styles.stepDotActive : {},
+          ...isCompleted ? styles.stepDotCompleted : {}
+        }, children: [
+          isActive && /* @__PURE__ */ jsx("div", { style: styles.stepDotSpinner }),
+          isCompleted && /* @__PURE__ */ jsx("span", { style: styles.checkmark, children: "\u2713" })
+        ] }),
+        /* @__PURE__ */ jsx("span", { style: {
+          ...styles.stepLabel,
+          ...isActive || isCompleted ? styles.stepLabelActive : {}
+        }, children: label })
+      ] }, label);
+    }) })
+  ] });
+};
 function NexusPayment(props) {
   const {
     merchantAddress,
@@ -321,40 +675,38 @@ function NexusPayment(props) {
     maxAmount,
     className = "",
     buttonText,
-    amountLabel = "Amount (USDC)",
+    amountLabel = "PAYMENT AMOUNT",
     onSuccess,
     onError,
-    onStatusChange
+    onStatusChange,
+    onClose,
+    referralCampaignId,
+    referrerAddress
   } = props;
   const { address, chain } = useAccount2();
   const chainId = useChainId();
-  const [inputAmount, setInputAmount] = useState3("");
-  const [txHash, setTxHash] = useState3(null);
   const directPayment = useDirectPayment();
   const cctpBridge = useCCTPBridge();
+  const [inputAmount, setInputAmount] = useState3("");
+  const [txHash, setTxHash] = useState3(null);
   const isDirectPayment = chainId === ARC_TESTNET_CHAIN_ID;
-  const activeHook = isDirectPayment ? directPayment : cctpBridge;
+  let activeHook = cctpBridge;
+  if (isDirectPayment) activeHook = directPayment;
   const currentStatus = activeHook.status;
   const currentError = activeHook.error;
+  const isLoading = activeHook.isLoading;
+  useEffect(() => {
+    if (onStatusChange && currentStatus) {
+      onStatusChange(currentStatus);
+    }
+  }, [currentStatus, onStatusChange]);
   const handlePayment = async () => {
     try {
-      if (!address || !chain) {
-        throw new Error("Please connect your wallet");
-      }
       const amount = mode === "fixed" ? fixedAmount : parseUnits(inputAmount, 6);
-      if (amount === 0n) {
-        throw new Error("Amount must be greater than 0");
-      }
-      if (minAmount && amount < minAmount) {
-        throw new Error(`Amount must be at least ${Number(minAmount) / 1e6} USDC`);
-      }
-      if (maxAmount && amount > maxAmount) {
-        throw new Error(`Amount must not exceed ${Number(maxAmount) / 1e6} USDC`);
-      }
+      if (amount === 0n) throw new Error("Amount must be greater than 0");
+      if (!address) throw new Error("Please connect your EVM wallet");
       const chainConfig = CCTP_CONTRACTS[chainId];
-      if (!chainConfig) {
-        throw new Error("Unsupported chain. Please switch to a supported network.");
-      }
+      if (!chainConfig) throw new Error("Unsupported EVM chain");
       let resultTxHash;
       if (isDirectPayment) {
         resultTxHash = await directPayment.executePayment({
@@ -370,228 +722,114 @@ function NexusPayment(props) {
           merchant: merchantAddress,
           orderId,
           sourceChainId: chainId,
-          operatorPrivateKey
+          operatorPrivateKey,
+          campaignId: referralCampaignId,
+          referrer: referrerAddress
         });
         resultTxHash = result.burnTxHash;
       }
       setTxHash(resultTxHash);
       onSuccess?.(resultTxHash, amount);
     } catch (err) {
-      const error = err instanceof Error ? err : new Error(String(err));
-      onError?.(error);
+      onError?.(err);
     }
   };
-  if (onStatusChange && currentStatus) {
-    onStatusChange(currentStatus);
-  }
-  const isLoading = activeHook.isLoading;
-  const isDisabled = !address || isLoading;
-  const paymentType = isDirectPayment ? "Direct" : "Cross-chain";
-  return /* @__PURE__ */ jsx("div", { className: `nexus-payment ${className}`, style: defaultStyles.container, children: /* @__PURE__ */ jsxs("div", { className: "nexus-payment-content", style: defaultStyles.content, children: [
-    /* @__PURE__ */ jsx("h3", { style: defaultStyles.title, children: "Payment" }),
-    mode === "fixed" ? /* @__PURE__ */ jsxs("div", { className: "amount-display", style: defaultStyles.amountDisplay, children: [
-      /* @__PURE__ */ jsx("label", { style: defaultStyles.label, children: amountLabel }),
-      /* @__PURE__ */ jsxs("div", { className: "fixed-amount", style: defaultStyles.fixedAmount, children: [
-        fixedAmount ? (Number(fixedAmount) / 1e6).toFixed(2) : "0.00",
-        " USDC"
+  const getWalletGradient = (addr) => {
+    const seed = parseInt(addr.slice(0, 8), 16) || 0;
+    const c1 = Math.floor(seed % 360);
+    const c2 = Math.floor(seed / 360 % 360);
+    return `linear-gradient(135deg, hsl(${c1}, 70%, 60%), hsl(${c2}, 70%, 60%))`;
+  };
+  return /* @__PURE__ */ jsxs("div", { className: `nexus-payment ${className}`, style: styles.container, children: [
+    /* @__PURE__ */ jsx("div", { style: styles.header, children: /* @__PURE__ */ jsxs("div", { style: styles.logoRow, children: [
+      /* @__PURE__ */ jsx("div", { style: styles.logoIcon, children: "N" }),
+      /* @__PURE__ */ jsx("span", { style: styles.logoText, children: "NexusPay" })
+    ] }) }),
+    /* @__PURE__ */ jsx("div", { style: { marginBottom: "24px", display: "flex", justifyContent: "center" }, children: address ? /* @__PURE__ */ jsxs("div", { style: styles.walletBadge, children: [
+      /* @__PURE__ */ jsx("div", { style: { ...styles.walletAvatar, background: getWalletGradient(address) } }),
+      /* @__PURE__ */ jsxs("span", { style: styles.walletAddress, children: [
+        address.slice(0, 6),
+        "...",
+        address.slice(-4)
       ] })
-    ] }) : /* @__PURE__ */ jsxs("div", { className: "amount-input", style: defaultStyles.inputGroup, children: [
-      /* @__PURE__ */ jsx("label", { htmlFor: "amount", style: defaultStyles.label, children: amountLabel }),
-      /* @__PURE__ */ jsxs("div", { style: defaultStyles.inputWrapper, children: [
+    ] }) : /* @__PURE__ */ jsx("div", { style: styles.disconnectedBadge, children: "EVM Wallet Not Connected" }) }),
+    /* @__PURE__ */ jsxs("div", { style: styles.amountSection, children: [
+      /* @__PURE__ */ jsx("label", { style: styles.label, children: amountLabel }),
+      mode === "fixed" ? /* @__PURE__ */ jsxs("div", { style: styles.hugeDisplay, children: [
+        (Number(fixedAmount) / 1e6).toFixed(2),
+        /* @__PURE__ */ jsx("span", { style: styles.currencySymbol, children: "USDC" })
+      ] }) : /* @__PURE__ */ jsxs("div", { style: styles.inputWrapper, children: [
+        /* @__PURE__ */ jsx("span", { style: styles.currencyPrefix, children: "$" }),
         /* @__PURE__ */ jsx(
           "input",
           {
-            id: "amount",
             type: "number",
-            step: "0.01",
-            min: minAmount ? Number(minAmount) / 1e6 : 0,
-            max: maxAmount ? Number(maxAmount) / 1e6 : void 0,
             value: inputAmount,
             onChange: (e) => setInputAmount(e.target.value),
             placeholder: "0.00",
-            style: defaultStyles.input
+            style: styles.hugeInput
           }
         ),
-        /* @__PURE__ */ jsx("span", { className: "currency", style: defaultStyles.currency, children: "USDC" })
+        /* @__PURE__ */ jsx("span", { style: styles.currencySymbol, children: "USDC" })
       ] })
     ] }),
-    /* @__PURE__ */ jsx("div", { className: "chain-info", style: defaultStyles.chainInfo, children: /* @__PURE__ */ jsx("small", { children: chain ? /* @__PURE__ */ jsxs(Fragment, { children: [
-      /* @__PURE__ */ jsx("strong", { children: chain.name }),
-      /* @__PURE__ */ jsx("span", { style: defaultStyles.badge, children: paymentType })
-    ] }) : "Connect your wallet to continue" }) }),
-    currentStatus && currentStatus !== "idle" && currentStatus !== "error" && /* @__PURE__ */ jsxs("div", { className: "status-message", style: defaultStyles.statusMessage, children: [
-      /* @__PURE__ */ jsx("div", { style: defaultStyles.spinner }),
-      /* @__PURE__ */ jsx("span", { children: !isDirectPayment && cctpBridge.currentStep ? cctpBridge.currentStep : currentStatus.charAt(0).toUpperCase() + currentStatus.slice(1) + "..." })
+    (activeHook.isLoading || currentStatus === "success") && /* @__PURE__ */ jsx(
+      PaymentStepper,
+      {
+        currentStep: activeHook.currentStep,
+        status: currentStatus
+      }
+    ),
+    currentError && /* @__PURE__ */ jsxs("div", { style: styles.errorBox, children: [
+      "\u26A0\uFE0F ",
+      typeof currentError === "string" ? currentError : currentError.message
     ] }),
-    currentError && /* @__PURE__ */ jsx("div", { className: "error-message", style: defaultStyles.errorMessage, children: typeof currentError === "string" ? currentError : currentError.message }),
-    currentStatus === "success" && txHash && /* @__PURE__ */ jsxs("div", { className: "success-message", style: defaultStyles.successMessage, children: [
-      "Payment successful!",
+    currentStatus === "success" && txHash && /* @__PURE__ */ jsxs("div", { style: styles.successBox, children: [
+      "\u2705 Payment Successful!",
       chain?.blockExplorers?.default && /* @__PURE__ */ jsx(
         "a",
         {
           href: `${chain.blockExplorers.default.url}/tx/${txHash}`,
           target: "_blank",
-          rel: "noopener noreferrer",
-          style: defaultStyles.link,
-          children: "View transaction"
+          rel: "noreferrer",
+          style: styles.link,
+          children: "View Receipt"
         }
       )
     ] }),
-    /* @__PURE__ */ jsx(
-      "button",
-      {
-        onClick: handlePayment,
-        disabled: isDisabled,
-        className: "payment-button",
-        style: {
-          ...defaultStyles.button,
-          ...isDisabled ? defaultStyles.buttonDisabled : {}
-        },
-        children: !address ? "Connect Wallet" : isLoading ? "Processing..." : buttonText || (mode === "fixed" ? "Pay Now" : "Send Payment")
-      }
-    )
-  ] }) });
+    /* @__PURE__ */ jsxs("div", { style: styles.actionSection, children: [
+      chain && /* @__PURE__ */ jsxs("div", { style: styles.networkInfo, children: [
+        /* @__PURE__ */ jsx("span", { style: styles.networkDot }),
+        "Running on ",
+        chain.name
+      ] }),
+      currentStatus === "success" && onClose ? /* @__PURE__ */ jsx(
+        "button",
+        {
+          onClick: onClose,
+          style: {
+            ...styles.payButton,
+            background: "#fff",
+            color: "#111",
+            border: "2px solid #e5e7eb"
+          },
+          children: "Close"
+        }
+      ) : /* @__PURE__ */ jsx(
+        "button",
+        {
+          onClick: handlePayment,
+          disabled: !address || isLoading,
+          style: {
+            ...styles.payButton,
+            ...!address || isLoading ? styles.payButtonDisabled : {}
+          },
+          children: isLoading ? /* @__PURE__ */ jsx("span", { style: styles.loadingSpinner }) : !address ? "Connect Wallet" : buttonText || "Pay Now"
+        }
+      )
+    ] })
+  ] });
 }
-var defaultStyles = {
-  container: {
-    fontFamily: '-apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif',
-    maxWidth: "400px",
-    margin: "0 auto"
-  },
-  content: {
-    padding: "24px",
-    border: "1px solid #e5e7eb",
-    borderRadius: "12px",
-    backgroundColor: "#ffffff"
-  },
-  title: {
-    margin: "0 0 20px 0",
-    fontSize: "20px",
-    fontWeight: "600",
-    color: "#111827"
-  },
-  amountDisplay: {
-    marginBottom: "16px"
-  },
-  inputGroup: {
-    marginBottom: "16px"
-  },
-  label: {
-    display: "block",
-    marginBottom: "8px",
-    fontSize: "14px",
-    fontWeight: "500",
-    color: "#374151"
-  },
-  fixedAmount: {
-    padding: "12px 16px",
-    fontSize: "24px",
-    fontWeight: "600",
-    color: "#111827",
-    backgroundColor: "#f9fafb",
-    borderRadius: "8px",
-    textAlign: "center"
-  },
-  inputWrapper: {
-    position: "relative",
-    display: "flex",
-    alignItems: "center"
-  },
-  input: {
-    width: "100%",
-    padding: "12px 70px 12px 16px",
-    fontSize: "16px",
-    border: "1px solid #d1d5db",
-    borderRadius: "8px",
-    outline: "none"
-  },
-  currency: {
-    position: "absolute",
-    right: "16px",
-    color: "#6b7280",
-    fontWeight: "500"
-  },
-  chainInfo: {
-    marginBottom: "16px",
-    padding: "8px 12px",
-    backgroundColor: "#f3f4f6",
-    borderRadius: "6px",
-    fontSize: "13px",
-    color: "#4b5563",
-    display: "flex",
-    alignItems: "center",
-    gap: "8px"
-  },
-  badge: {
-    marginLeft: "8px",
-    padding: "2px 8px",
-    backgroundColor: "#dbeafe",
-    color: "#1e40af",
-    borderRadius: "4px",
-    fontSize: "11px",
-    fontWeight: "600",
-    textTransform: "uppercase"
-  },
-  statusMessage: {
-    marginBottom: "16px",
-    padding: "12px",
-    backgroundColor: "#eff6ff",
-    border: "1px solid #bfdbfe",
-    borderRadius: "8px",
-    color: "#1e40af",
-    fontSize: "14px",
-    display: "flex",
-    alignItems: "center",
-    gap: "8px"
-  },
-  errorMessage: {
-    marginBottom: "16px",
-    padding: "12px",
-    backgroundColor: "#fef2f2",
-    border: "1px solid #fecaca",
-    borderRadius: "8px",
-    color: "#991b1b",
-    fontSize: "14px"
-  },
-  successMessage: {
-    marginBottom: "16px",
-    padding: "12px",
-    backgroundColor: "#f0fdf4",
-    border: "1px solid #bbf7d0",
-    borderRadius: "8px",
-    color: "#166534",
-    fontSize: "14px"
-  },
-  link: {
-    marginLeft: "8px",
-    color: "#2563eb",
-    textDecoration: "underline"
-  },
-  button: {
-    width: "100%",
-    padding: "14px",
-    fontSize: "16px",
-    fontWeight: "600",
-    color: "#ffffff",
-    backgroundColor: "#2563eb",
-    border: "none",
-    borderRadius: "8px",
-    cursor: "pointer",
-    transition: "background-color 0.2s"
-  },
-  buttonDisabled: {
-    backgroundColor: "#9ca3af",
-    cursor: "not-allowed"
-  },
-  spinner: {
-    width: "14px",
-    height: "14px",
-    border: "2px solid #bfdbfe",
-    borderTopColor: "#2563eb",
-    borderRadius: "50%",
-    animation: "spin 1s linear infinite"
-  }
-};
 export {
   ARC_TESTNET_CHAIN_ID,
   NEXUS_VAULT_ADDRESS,

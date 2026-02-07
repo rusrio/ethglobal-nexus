@@ -26,14 +26,12 @@ interface NexusPaymentProps {
     onSuccess?: (txHash: string, amount: bigint) => void;
     onError?: (error: Error) => void;
     onStatusChange?: (status: PaymentStatus) => void;
+    /** Optional callback when user closes the success view */
+    onClose?: () => void;
+    referralCampaignId?: number | bigint;
+    referrerAddress?: string;
 }
 
-/**
- * NexusPayment Component
- *
- * Cross-chain USDC payment component with CCTP integration.
- * Supports payments from Ethereum Sepolia, Base Sepolia, Arbitrum Sepolia to Arc Testnet.
- */
 declare function NexusPayment(props: NexusPaymentProps): react_jsx_runtime.JSX.Element;
 
 /**

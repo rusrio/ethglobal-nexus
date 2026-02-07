@@ -31,6 +31,8 @@ export function useCCTPBridge() {
     orderId: string;
     sourceChainId: number;
     operatorPrivateKey: `0x${string}`;
+    campaignId?: number | bigint;
+    referrer?: `0x${string}`;
   }) => {
     try {
       setError(null);
@@ -43,11 +45,15 @@ export function useCCTPBridge() {
       setStatus('approving');
       setCurrentStep('Approving USDC...');
       
+      // Circle requires a minimum fee for fast attestation (~0.02 USDC)
+      const protocolFee = 20000n; // 0.02 USDC
+      const totalAmountToBurn = params.amount + protocolFee;
+      
       const approveTxHash = await writeContractAsync({
         address: chainConfig.usdc,
         abi: USDC_ABI,
         functionName: 'approve',
-        args: [chainConfig.tokenMessenger, params.amount],
+        args: [chainConfig.tokenMessenger, totalAmountToBurn],
       });
 
       console.log('Approval tx:', approveTxHash);
@@ -55,11 +61,21 @@ export function useCCTPBridge() {
       setStatus('burning');
       setCurrentStep('Preparing hook data...');
       
-      // Encode merchant and orderId into hookData (no Forwarding Service prefix needed)
-      const hookData = encodeAbiParameters(
-        parseAbiParameters('address, string'),
-        [params.merchant, params.orderId]
-      );
+      // Encode hookData. If referral info is present, use extended format.
+      let hookData: `0x${string}`;
+      
+      if (params.campaignId && params.referrer && Number(params.campaignId) > 0) {
+        console.log('Encoding referral data:', params.campaignId, params.referrer);
+        hookData = encodeAbiParameters(
+            parseAbiParameters('address, string, uint256, address'),
+            [params.merchant, params.orderId, BigInt(params.campaignId), params.referrer]
+        );
+      } else {
+        hookData = encodeAbiParameters(
+            parseAbiParameters('address, string'),
+            [params.merchant, params.orderId]
+        );
+      }
 
       setCurrentStep('Burning USDC on source chain...');
 
@@ -69,8 +85,9 @@ export function useCCTPBridge() {
       // Circle requires a minimum fee for fast attestation (~0.02 USDC)
       // This fee is mandatory to avoid "insufficient_fee" delay
       // The fee will be deducted in NexusVault before crediting merchant
-      const protocolFee = 20000n; // 0.02 USDC
-      const totalAmountToBurn = params.amount + protocolFee;
+      // Protocol fee is already defined above
+      // const protocolFee = 20000n; 
+      // const totalAmountToBurn = params.amount + protocolFee;
 
       const burnTxHash = await writeContractAsync({
         address: chainConfig.tokenMessenger,

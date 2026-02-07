@@ -40,13 +40,13 @@ export const CCTP_CONTRACTS = {
 /**
  * NexusVault contract address on Arc Testnet
  */
-export const NEXUS_VAULT_ADDRESS = '0xd212F75CA5592244673C27664A8e8332D45f023E' as `0x${string}`;
+export const NEXUS_VAULT_ADDRESS = '0x05949CFfCE00B0032194cb7B8f8e72bBF1376012' as `0x${string}`;
 
 /**
  * NexusPayRelay contract address on Arc Testnet
  * @dev This wrapper contract relays CCTP messages and manually invokes hooks
  */
-export const NEXUS_PAY_RELAY_ADDRESS = '0xCe4Fdab26E8b8E139cd61dC6E616beAF53266C3c' as `0x${string}`;
+export const NEXUS_PAY_RELAY_ADDRESS = '0xCDe4188f4bB253dc5f896bDd230B8b56Dff37386' as `0x${string}`;
 
 /**
  * NexusPayRelay ABI - minimal interface for relaying payments
