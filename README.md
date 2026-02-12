@@ -1,5 +1,7 @@
 # Nexus
 
+![ETHGlobal](https://img.shields.io/badge/ETHGlobal-Hackathon-blueviolet) ![Arc Testnet](https://img.shields.io/badge/Arc-Testnet-success)
+
 This repository contains the complete codebase for **Nexus**, a simplified cross-chain payment solution that allows merchants to accept USDC on any chain and settle instantly on the **Arc Testnet**.
 
 ## Project Structure
